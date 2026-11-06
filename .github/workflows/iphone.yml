@@ -27,9 +27,29 @@ jobs:
       - name: Install pinned Rust toolchain
         working-directory: game
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Restore compiled dependencies
+        id: rust-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            game/target
+          key: ios-intel-rust1981-v1-${{ hashFiles('game/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ios-intel-rust1981-v1-${{ hashFiles('game/Cargo.lock') }}-
       - name: Build native iPhone engine
         working-directory: game
         run: bash scripts/ios-build.sh
+      - name: Preserve compilation progress even on failure
+        if: always() && steps.rust-cache.outcome == 'success'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            game/target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Save engine bundle
         uses: actions/upload-artifact@v4
         with:
