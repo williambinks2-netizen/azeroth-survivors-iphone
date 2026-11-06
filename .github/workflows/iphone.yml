@@ -1,0 +1,47 @@
+name: Build iPhone engine
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: iphone-build
+  cancel-in-progress: true
+jobs:
+  iphone:
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_RELEASE_DEBUG: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned source and apply iPhone changes
+        shell: bash
+        run: |
+          git init game
+          git -C game remote add origin https://github.com/OutThisLife/azeroth-survivors-re.git
+          git -C game fetch --depth 1 origin 72048f4056e2a57d99234e4fb658179e577d1d92
+          git -C game checkout --detach FETCH_HEAD
+          git -C game apply --check ../iphone.patch
+          git -C game apply ../iphone.patch
+      - name: Install pinned Rust toolchain
+        working-directory: game
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Format and test touch input
+        working-directory: game
+        run: |
+          cargo fmt --all
+          cargo test --locked --lib -p benilla-app --no-default-features --features mobile-touch survivors::mobile::tests
+      - name: Build native iPhone engine
+        working-directory: game
+        run: bash scripts/ios-build.sh
+      - name: Save engine bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: iphone-engine
+          path: game/ios/build/iphone-engine.zip
+          if-no-files-found: error
+          retention-days: 3

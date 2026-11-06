@@ -1,0 +1,598 @@
+diff --git a/crates/benilla-app/Cargo.toml b/crates/benilla-app/Cargo.toml
+index 0f43836..26fc732 100644
+--- a/crates/benilla-app/Cargo.toml
++++ b/crates/benilla-app/Cargo.toml
+@@ -20,6 +20,8 @@ trace_chrome = ["bevy/trace_chrome"]
+ # needs WebGPU).
+ webgl2 = ["bevy/webgl2", "benilla-world/webgl2"]
+ webgpu = ["bevy/webgpu", "benilla-world/webgpu"]
++# Enables the iPhone controls on desktop for development.
++mobile-touch = []
+ 
+ [dependencies]
+ # Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and
+@@ -80,12 +82,12 @@ rand = "0.8"
+ 
+ # The EditBox clipboard, on the main thread as NSPasteboard requires; bevy_egui's 3.x. Native-only:
+ # arboard has no wasm32 backend (`textinput/clipboard.rs` falls back to no pasteboard there).
+-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++[target.'cfg(not(any(target_arch = "wasm32", target_os = "ios")))'.dependencies]
+ arboard = "3"
+ 
+ # Wayland clipboard over the standard `wl_data_device`; arboard's speaks `wlr-data-control`,
+ # which GNOME does not implement.
+-[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
++[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))'.dependencies]
+ raw-window-handle = "0.6"
+ smithay-clipboard = "0.7"
+ 
+diff --git a/crates/benilla-app/src/survivors/hero.rs b/crates/benilla-app/src/survivors/hero.rs
+index 8bf9cc3..b777451 100644
+--- a/crates/benilla-app/src/survivors/hero.rs
++++ b/crates/benilla-app/src/survivors/hero.rs
+@@ -195,6 +195,8 @@ pub(super) fn drive_hero(
+     aim: Res<AimPoint>,
+     world: WorldPoint,
+     auto: Option<Res<super::auto::Auto>>,
++    #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++    mut mobile: ResMut<super::mobile::MobileInput>,
+     mut player: ResMut<crate::player::Player>,
+     mut hero: Query<(&mut Transform, &mut MovementState, &mut Hero)>,
+ ) {
+@@ -227,6 +229,23 @@ pub(super) fn drive_hero(
+                 }
+             }
+             let mut pos = tf.translation;
++            #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++            let mut touch_step = None;
++            #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++            if *phase.get() == Phase::Playing && run.dead_t.is_none() && auto.is_none() {
++                if dir != Vec3::ZERO {
++                    mobile.target = None;
++                } else if let Some(target) = mobile.target {
++                    let offset = flat(target - pos);
++                    let distance = offset.length();
++                    if distance <= 0.15 {
++                        mobile.target = None;
++                    } else {
++                        dir = offset / distance;
++                        touch_step = Some(distance);
++                    }
++                }
++            }
+             // Locked, the hero faces the cursor and WASD moves him under it, so he backpedals and
+             // strafes as a player does; unlocked (or driven), he faces where he runs.
+             let face = (rig.mode == CamMode::Fixed
+@@ -244,7 +263,10 @@ pub(super) fn drive_hero(
+             if dir != Vec3::ZERO && dt > 0.0 {
+                 let dir = dir.normalize();
+                 let speed = run.stats().speed * run.haste_mult();
+-                pos += dir * speed * dt;
++                let step = speed * dt;
++                #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++                let step = touch_step.map_or(step, |distance| step.min(distance));
++                pos += dir * step;
+                 mv.speed = speed;
+                 mv.flags = match face {
+                     Some(look) => gait(look, dir),
+@@ -272,7 +294,10 @@ pub(super) fn drive_hero(
+             let ground = world.terrain_height_under(pos).unwrap_or(pos.y);
+             let playing = *phase.get() == Phase::Playing && run.dead_t.is_none();
+             // Space hops: lift off the terrain, then gravity brings the hero back down.
+-            if playing && keys.just_pressed(KeyCode::Space) && hm.vy == 0.0 && hm.air == 0.0 {
++            let jump = keys.just_pressed(KeyCode::Space);
++            #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++            let jump = jump || mobile.jump;
++            if playing && jump && hm.vy == 0.0 && hm.air == 0.0 {
+                 hm.vy = JUMP_SPEED;
+             }
+             if playing && (hm.vy != 0.0 || hm.air > 0.0) {
+diff --git a/crates/benilla-app/src/survivors/mobile.rs b/crates/benilla-app/src/survivors/mobile.rs
+new file mode 100644
+index 0000000..dade0ad
+--- /dev/null
++++ b/crates/benilla-app/src/survivors/mobile.rs
+@@ -0,0 +1,259 @@
++//! Single-pointer touch controls for the iPhone port; opt-in on desktop for testing.
++use bevy::input::{touch::TouchPhase, InputSystems};
++use bevy::prelude::*;
++use bevy::window::PrimaryWindow;
++
++use super::{hero, hud, mobility, Phase, Run, Selection};
++use super::units::flat;
++
++#[derive(Resource, Default)]
++pub(super) struct MobileInput {
++    pub target: Option<Vec3>,
++    pub jump: bool,
++    pub ability: bool,
++    began_on_ui: bool,
++}
++
++#[derive(Resource, Default)]
++struct Pointer {
++    finger: Option<u64>,
++    pending: std::collections::VecDeque<TouchInput>,
++    cancelled: bool,
++}
++
++#[derive(Component, Clone, Copy)]
++enum Action { Jump, Ability, Pause, Stop }
++
++#[derive(Component)]
++struct Controls;
++
++pub(super) fn plugin(app: &mut App) {
++    app.init_resource::<MobileInput>()
++        .init_resource::<Pointer>()
++        .add_systems(Startup, controls)
++        .add_systems(PreUpdate, pointer.after(InputSystems).before(bevy::ui::UiSystems::Focus))
++        .add_systems(Update, input.after(hero::aim_cursor).before(mobility::cast_mobility))
++        .add_systems(Update, show_controls.after(hud::show_panels));
++}
++
++// Keep the cursor at the lift position: the character-selection UI clicks on
++// Pressed -> Hovered. A quick tap's press and release must occupy separate frames.
++fn pointer(
++    mut events: MessageReader<TouchInput>,
++    mut state: ResMut<Pointer>,
++    mut mouse: ResMut<ButtonInput<MouseButton>>,
++    mut windows: Query<&mut Window, With<PrimaryWindow>>,
++) {
++    state.cancelled = false;
++    state.pending.extend(events.read().copied());
++    let Ok(mut window) = windows.single_mut() else { return };
++    if !window.focused {
++        state.finger = None;
++        state.pending.clear();
++        state.cancelled = true;
++        mouse.release(MouseButton::Left);
++        window.set_cursor_position(None);
++        return;
++    }
++    while let Some(event) = state.pending.pop_front() {
++        match event.phase {
++            TouchPhase::Started if state.finger.is_none() => {
++                state.finger = Some(event.id);
++                window.set_cursor_position(Some(event.position));
++                mouse.press(MouseButton::Left);
++                break;
++            }
++            TouchPhase::Moved if state.finger == Some(event.id) => {
++                window.set_cursor_position(Some(event.position));
++            }
++            TouchPhase::Ended | TouchPhase::Canceled if state.finger == Some(event.id) => {
++                state.finger = None;
++                state.cancelled = event.phase == TouchPhase::Canceled;
++                window.set_cursor_position(if state.cancelled { None } else { Some(event.position) });
++                mouse.release(MouseButton::Left);
++                break;
++            }
++            _ => {}
++        }
++    }
++}
++
++fn controls(mut commands: Commands) {
++    commands.spawn((
++        Controls,
++        Node {
++            position_type: PositionType::Absolute,
++            right: Val::Px(120.0),
++            bottom: Val::Px(110.0),
++            column_gap: Val::Px(18.0),
++            ..default()
++        },
++        GlobalZIndex(100),
++        Visibility::Hidden,
++    )).with_children(|parent| {
++        for (action, label) in [
++            (Action::Stop, "Stop"),
++            (Action::Jump, "Jump"),
++            (Action::Ability, "Ability"),
++            (Action::Pause, "Pause / Resume"),
++        ] {
++            parent.spawn((
++                Button,
++                action,
++                Node {
++                    min_width: Val::Px(112.0),
++                    height: Val::Px(112.0),
++                    padding: UiRect::all(Val::Px(12.0)),
++                    align_items: AlignItems::Center,
++                    justify_content: JustifyContent::Center,
++                    ..default()
++                },
++                BackgroundColor(Color::srgba(0.06, 0.09, 0.13, 0.9)),
++            )).with_child((
++                Text::new(label),
++                TextFont { font_size: 24.0, ..default() },
++                TextColor(Color::WHITE),
++            ));
++        }
++    });
++}
++
++fn show_controls(
++    phase: Res<State<Phase>>,
++    mut controls: Query<&mut Visibility, With<Controls>>,
++) {
++    for mut visible in &mut controls {
++        *visible = if matches!(phase.get(), Phase::Playing | Phase::Paused) {
++            Visibility::Visible
++        } else {
++            Visibility::Hidden
++        };
++    }
++}
++
++#[allow(clippy::too_many_arguments)]
++fn input(
++    phase: Res<State<Phase>>,
++    run: Res<Run>,
++    selection: Res<Selection>,
++    loading: Res<crate::loading_screen::LoadingScreen>,
++    pointer: Res<Pointer>,
++    mouse: Res<ButtonInput<MouseButton>>,
++    interactions: Query<&Interaction>,
++    actions: Query<(&Action, &Interaction), Changed<Interaction>>,
++    windows: Query<&Window, With<PrimaryWindow>>,
++    mut next: ResMut<NextState<Phase>>,
++    mut mobile: ResMut<MobileInput>,
++    mut aim: ResMut<hero::AimPoint>,
++) {
++    mobile.jump = false;
++    mobile.ability = false;
++    let focused = windows.single().is_ok_and(|w| w.focused);
++    if !focused || pointer.cancelled || loading.covering() || run.dead_t.is_some() {
++        mobile.target = None;
++        mobile.began_on_ui = true;
++        if !focused && *phase.get() == Phase::Playing {
++            next.set(Phase::Paused);
++        }
++        return;
++    }
++    if *phase.get() != Phase::Playing {
++        mobile.target = None;
++        mobile.began_on_ui = true;
++    }
++    let mut action_pressed = false;
++    for (action, interaction) in &actions {
++        if *interaction != Interaction::Pressed { continue; }
++        action_pressed = true;
++        match (action, phase.get()) {
++            (Action::Jump, Phase::Playing) => mobile.jump = true,
++            (Action::Ability, Phase::Playing) => mobile.ability = true,
++            (Action::Stop, _) => mobile.target = None,
++            (Action::Pause, Phase::Playing) => {
++                mobile.target = None;
++                next.set(Phase::Paused);
++            }
++            (Action::Pause, Phase::Paused) => next.set(Phase::Playing),
++            _ => {}
++        }
++    }
++    if mouse.just_pressed(MouseButton::Left) {
++        mobile.began_on_ui = interactions.iter().any(|i| *i == Interaction::Pressed);
++    }
++    if *phase.get() == Phase::Playing && !action_pressed && !mobile.began_on_ui
++        && mouse.pressed(MouseButton::Left)
++    {
++        if let Some(point) = aim.0 {
++            let map = selection.stage_def();
++            let center = hero::arena(map);
++            let offset = flat(point - center);
++            mobile.target = Some(if offset.length() > map.leash {
++                center + offset.normalize() * map.leash
++            } else { point });
++        }
++    }
++    // A button tap must not aim Blink at the button's position in the world.
++    if mobile.began_on_ui {
++        aim.0 = mobile.target;
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn test_app() -> (App, Entity) {
++        let mut app = App::new();
++        app.add_message::<TouchInput>()
++            .init_resource::<Pointer>()
++            .init_resource::<ButtonInput<MouseButton>>()
++            .add_systems(Update, pointer);
++        let window = app.world_mut().spawn((Window::default(), PrimaryWindow)).id();
++        (app, window)
++    }
++
++    fn touch(app: &mut App, window: Entity, phase: TouchPhase) {
++        app.world_mut().write_message(TouchInput {
++            phase,
++            position: Vec2::new(120.0, 80.0),
++            window,
++            force: None,
++            id: 7,
++        });
++    }
++
++    #[test]
++    fn quick_tap_keeps_press_and_release_on_separate_frames() {
++        let (mut app, window) = test_app();
++        touch(&mut app, window, TouchPhase::Started);
++        touch(&mut app, window, TouchPhase::Ended);
++        app.update();
++        assert!(app.world().resource::<ButtonInput<MouseButton>>().pressed(MouseButton::Left));
++        app.update();
++        assert!(!app.world().resource::<ButtonInput<MouseButton>>().pressed(MouseButton::Left));
++        assert_eq!(app.world().get::<Window>(window).unwrap().cursor_position(), Some(Vec2::new(120.0, 80.0)));
++    }
++
++    #[test]
++    fn cancelled_touch_cannot_release_over_a_menu_button() {
++        let (mut app, window) = test_app();
++        touch(&mut app, window, TouchPhase::Started);
++        app.update();
++        touch(&mut app, window, TouchPhase::Canceled);
++        app.update();
++        assert!(app.world().resource::<Pointer>().cancelled);
++        assert!(!app.world().resource::<ButtonInput<MouseButton>>().pressed(MouseButton::Left));
++        assert_eq!(app.world().get::<Window>(window).unwrap().cursor_position(), None);
++    }
++
++    #[test]
++    fn backgrounding_releases_the_pointer() {
++        let (mut app, window) = test_app();
++        touch(&mut app, window, TouchPhase::Started);
++        app.update();
++        app.world_mut().get_mut::<Window>(window).unwrap().focused = false;
++        app.update();
++        assert!(app.world().resource::<Pointer>().cancelled);
++        assert!(!app.world().resource::<ButtonInput<MouseButton>>().pressed(MouseButton::Left));
++    }
++}
+diff --git a/crates/benilla-app/src/survivors/mobility.rs b/crates/benilla-app/src/survivors/mobility.rs
+index c588a37..51ac606 100644
+--- a/crates/benilla-app/src/survivors/mobility.rs
++++ b/crates/benilla-app/src/survivors/mobility.rs
+@@ -174,6 +174,8 @@ impl Run {
+ pub(super) fn cast_mobility(
+     time: Res<Time>,
+     keys: Res<ButtonInput<KeyCode>>,
++    #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++    mobile: Res<super::mobile::MobileInput>,
+     phase: Res<State<Phase>>,
+     mut run: ResMut<Run>,
+     world: WorldPoint,
+@@ -188,7 +190,10 @@ pub(super) fn cast_mobility(
+     m.cd = (m.cd - dt).max(0.0);
+     m.haste_t = (m.haste_t - dt).max(0.0);
+     m.vanish_t = (m.vanish_t - dt).max(0.0);
+-    if *phase.get() != Phase::Playing || run.dead_t.is_some() || !keys.just_pressed(KEY) {
++    let cast = keys.just_pressed(KEY);
++    #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++    let cast = cast || mobile.ability;
++    if *phase.get() != Phase::Playing || run.dead_t.is_some() || !cast {
+         return;
+     }
+     let Some(def) = run.mobility() else { return };
+diff --git a/crates/benilla-app/src/survivors/mod.rs b/crates/benilla-app/src/survivors/mod.rs
+index fc9acfd..82581c5 100644
+--- a/crates/benilla-app/src/survivors/mod.rs
++++ b/crates/benilla-app/src/survivors/mod.rs
+@@ -16,6 +16,8 @@ mod hud;
+ mod menu;
+ mod minimap;
+ mod mobility;
++#[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++mod mobile;
+ mod units;
+ 
+ use benilla_world::schedule::WorldStage;
+@@ -37,6 +39,8 @@ pub(crate) struct SurvivorsPlugin;
+ 
+ impl Plugin for SurvivorsPlugin {
+     fn build(&self, app: &mut App) {
++        #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++        app.add_plugins(mobile::plugin);
+         // Present before `OnEnter(InWorld)`, where the UI lifecycle decides not to load FrameXML.
+         app.insert_resource(crate::run_mode::CaptureMode)
+             .add_plugins(grade::plugin)
+diff --git a/crates/benilla-app/src/textinput/clipboard.rs b/crates/benilla-app/src/textinput/clipboard.rs
+index cd2fa2a..5d98ff7 100644
+--- a/crates/benilla-app/src/textinput/clipboard.rs
++++ b/crates/benilla-app/src/textinput/clipboard.rs
+@@ -21,7 +21,7 @@ trait Pasteboard {
+ 
+ // `arboard` has no wasm32 backend at all (there is no OS pasteboard to open) — gated out so this
+ // impl only needs the crate on the platforms it ships for (see the Cargo.toml edge, wasm-only).
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
+ impl Pasteboard for arboard::Clipboard {
+     fn read_text(&mut self) -> Result<Option<String>, String> {
+         // `ContentNotAvailable` is arboard's empty clipboard, not a failure.
+@@ -49,7 +49,7 @@ impl Pasteboard for arboard::Clipboard {
+ }
+ 
+ /// The Wayland half; the gate must match `smithay-clipboard`'s target in `Cargo.toml`.
+-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
++#[cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))]
+ mod wl {
+     use super::Pasteboard;
+ 
+@@ -80,7 +80,7 @@ mod wl {
+ /// The primary window's `wl_display`, or `None` off Wayland, which selects [`arboard`]. Read from
+ /// the window handle, not `WAYLAND_DISPLAY`, because `smithay-clipboard` needs winit's own
+ /// connection.
+-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
++#[cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))]
+ pub(crate) fn wayland_display(handle: Option<&RawHandleWrapper>) -> Option<*mut c_void> {
+     match handle?.get_display_handle() {
+         raw_window_handle::RawDisplayHandle::Wayland(wl) => Some(wl.display.as_ptr()),
+@@ -89,7 +89,7 @@ pub(crate) fn wayland_display(handle: Option<&RawHandleWrapper>) -> Option<*mut
+ }
+ 
+ /// Off the Wayland-capable platforms the backend is always [`arboard`].
+-#[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android")))))]
++#[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios")))))]
+ pub(crate) fn wayland_display(_handle: Option<&RawHandleWrapper>) -> Option<*mut c_void> {
+     None
+ }
+@@ -99,13 +99,13 @@ pub(crate) fn wayland_display(_handle: Option<&RawHandleWrapper>) -> Option<*mut
+ /// # Safety
+ /// `display` must be a live `wl_display` that outlives the returned backend; the window handle's
+ /// `Arc` keeps the connection alive until app teardown drops the backend.
+-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
++#[cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))]
+ fn open_wayland(display: *mut c_void) -> Box<dyn Pasteboard> {
+     // SAFETY: `display` is winit's own live `wl_display`, per the doc comment.
+     Box::new(unsafe { smithay_clipboard::Clipboard::new(display) })
+ }
+ 
+-#[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android")))))]
++#[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios")))))]
+ fn open_wayland(_display: *mut c_void) -> Box<dyn Pasteboard> {
+     unreachable!("wayland_display() only yields Some on Wayland-capable platforms")
+ }
+@@ -142,7 +142,7 @@ impl HostClipboard {
+         self.opened = true;
+         self.backend = match wl_display {
+             Some(display) => Some(open_wayland(display)),
+-            #[cfg(not(target_arch = "wasm32"))]
++            #[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
+             None => match arboard::Clipboard::new() {
+                 Ok(clipboard) => Some(Box::new(clipboard)),
+                 Err(e) => {
+@@ -154,7 +154,7 @@ impl HostClipboard {
+             // isn't in its `unix`-and-friends cfg), and the browser's own clipboard is an async,
+             // gesture-gated API (`navigator.clipboard`) this synchronous seam can't call into —
+             // the copy/cut/paste chords silently no-op rather than fail loudly.
+-            #[cfg(target_arch = "wasm32")]
++            #[cfg(any(target_arch = "wasm32", target_os = "ios"))]
+             None => None,
+         };
+         if let Some(backend) = &self.backend {
+diff --git a/crates/benilla-world/src/boot.rs b/crates/benilla-world/src/boot.rs
+index fb6803d..6ba01f9 100644
+--- a/crates/benilla-world/src/boot.rs
++++ b/crates/benilla-world/src/boot.rs
+@@ -9,6 +9,17 @@ use crate::thread_qos;
+ /// `DefaultPlugins` with benilla's engine tuning applied, around the caller's primary window.
+ #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+ pub fn tuned_default_plugins(mut primary_window: Window) -> PluginGroupBuilder {
++    #[cfg(target_os = "ios")]
++    {
++        primary_window.mode = bevy::window::WindowMode::BorderlessFullscreen(
++            bevy::window::MonitorSelection::Primary,
++        );
++        primary_window.resizable = false;
++        primary_window.prefers_home_indicator_hidden = true;
++        primary_window.prefers_status_bar_hidden = true;
++        primary_window.preferred_screen_edges_deferring_system_gestures =
++            bevy::window::ScreenEdge::Bottom;
++    }
+     // The web build's canvas binding: with no `canvas` selector winit creates its own `<canvas>`
+     // and appends it to `<body>` at a fixed size, ignoring the full-viewport element
+     // `web/index.html` already gives it — so bind to that one by id instead and let it own the
+diff --git a/crates/warcraft-survivors/Cargo.toml b/crates/warcraft-survivors/Cargo.toml
+index a83d784..295a18e 100644
+--- a/crates/warcraft-survivors/Cargo.toml
++++ b/crates/warcraft-survivors/Cargo.toml
+@@ -11,6 +11,7 @@ workspace = true
+ [features]
+ default = ["dev"]
+ dev = ["benilla-app/dev"]
++mobile-touch = ["benilla-app/mobile-touch"]
+ 
+ [dependencies]
+ benilla-app = { path = "../benilla-app", default-features = false }
+diff --git a/crates/warcraft-survivors/src/main.rs b/crates/warcraft-survivors/src/main.rs
+index a7fffc3..3b9f75b 100644
+--- a/crates/warcraft-survivors/src/main.rs
++++ b/crates/warcraft-survivors/src/main.rs
+@@ -3,6 +3,16 @@
+ use benilla_app::BuildId;
+ 
+ fn main() -> benilla_app::AppExit {
++    #[cfg(target_os = "ios")]
++    {
++        // Set sandbox paths before the engine starts worker threads. The bundle
++        // contains read-only game data; preferences belong in Application Support.
++        let sandbox = std::env::var_os("HOME").expect("iOS sandbox HOME is missing");
++        let config = std::path::PathBuf::from(sandbox)
++            .join("Library/Application Support/AzerothSurvivors");
++        std::fs::create_dir_all(&config).expect("cannot create iOS settings directory");
++        std::env::set_var("BENILLA_HOME", config);
++    }
+     benilla_app::run_survivors(BuildId {
+         version: env!("CARGO_PKG_VERSION"),
+         describe: env!("BENILLA_GIT_DESCRIBE"),
+diff --git a/ios/Info.plist b/ios/Info.plist
+new file mode 100644
+index 0000000..635bcd4
+--- /dev/null
++++ b/ios/Info.plist
+@@ -0,0 +1,24 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++  <key>CFBundleIdentifier</key><string>personal.azerothsurvivors.iphone</string>
++  <key>CFBundleExecutable</key><string>AzerothSurvivors</string>
++  <key>CFBundleName</key><string>Azeroth Survivors</string>
++  <key>CFBundleDisplayName</key><string>Azeroth Survivors</string>
++  <key>CFBundlePackageType</key><string>APPL</string>
++  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
++  <key>CFBundleShortVersionString</key><string>0.1.0</string>
++  <key>CFBundleVersion</key><string>1</string>
++  <key>MinimumOSVersion</key><string>18.0</string>
++  <key>LSRequiresIPhoneOS</key><true/>
++  <key>UIDeviceFamily</key><array><integer>1</integer></array>
++  <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string><string>metal</string></array>
++  <key>UISupportedInterfaceOrientations</key>
++  <array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
++  <key>UIRequiresFullScreen</key><true/>
++  <key>UIStatusBarHidden</key><true/>
++  <key>UIViewControllerBasedStatusBarAppearance</key><true/>
++  <key>UILaunchScreen</key><dict/>
++</dict>
++</plist>
+diff --git a/scripts/ios-build.sh b/scripts/ios-build.sh
+new file mode 100644
+index 0000000..8e871ac
+--- /dev/null
++++ b/scripts/ios-build.sh
+@@ -0,0 +1,32 @@
++#!/usr/bin/env bash
++# Produce a native device bundle. Signing is performed by the sideloading tool.
++set -euo pipefail
++cd "$(dirname "$0")/.."
++if [[ "$(uname -s)" != Darwin ]]; then
++  echo "An Apple SDK on macOS is required. Use the prepared GitHub Actions workflow." >&2
++  exit 1
++fi
++command -v cargo >/dev/null
++command -v rustup >/dev/null
++export IPHONEOS_DEPLOYMENT_TARGET=18.0
++export SDKROOT
++SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
++export CC_aarch64_apple_ios
++CC_aarch64_apple_ios="$(xcrun --sdk iphoneos --find clang)"
++export CFLAGS_aarch64_apple_ios="-isysroot $SDKROOT -miphoneos-version-min=18.0"
++export BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios="--target=arm64-apple-ios18.0 -isysroot $SDKROOT"
++rustup target add aarch64-apple-ios
++cargo build --locked --release --no-default-features -p warcraft-survivors --target aarch64-apple-ios
++stage="$(mktemp -d "${TMPDIR:-/tmp}/azeroth-ios.XXXXXX")"
++trap 'rm -rf "$stage"' EXIT
++app="$stage/Payload/AzerothSurvivors.app"
++mkdir -p "$app" ios/build
++cp target/aarch64-apple-ios/release/warcraft-survivors "$app/AzerothSurvivors"
++cp ios/Info.plist "$app/Info.plist"
++chmod 755 "$app/AzerothSurvivors"
++plutil -lint "$app/Info.plist"
++file "$app/AzerothSurvivors" | grep -q 'Mach-O 64-bit executable arm64'
++xcrun vtool -show-build "$app/AzerothSurvivors"
++# This is intentionally not called an IPA: game data must be added locally first.
++ditto -c -k --keepParent "$stage/Payload" ios/build/iphone-engine.zip
++echo "Created ios/build/iphone-engine.zip (unsigned engine; no game data)."
