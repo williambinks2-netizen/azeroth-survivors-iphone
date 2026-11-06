@@ -596,3 +596,44 @@ index 0000000..8e871ac
 +# This is intentionally not called an IPA: game data must be added locally first.
 +ditto -c -k --keepParent "$stage/Payload" ios/build/iphone-engine.zip
 +echo "Created ios/build/iphone-engine.zip (unsigned engine; no game data)."
+diff --git a/third_party/lua-src/lua-5.1.5/loslib.c b/third_party/lua-src/lua-5.1.5/loslib.c
+index 2a41a24..7426e89 100644
+--- a/third_party/lua-src/lua-5.1.5/loslib.c
++++ b/third_party/lua-src/lua-5.1.5/loslib.c
+@@ -36,7 +36,9 @@ static int os_pushresult (lua_State *L, int i, const char *filename) {
+ 
+ 
+ static int os_execute (lua_State *L) {
+-#if !defined(__wasi__)
++#if defined(LUA_USE_IOS)
++  return luaL_error(L, "os.execute is not supported on iOS");
++#elif !defined(__wasi__)
+   lua_pushinteger(L, system(luaL_optstring(L, 1, NULL)));
+   return 1;
+ #else
+diff --git a/third_party/lua-src/lua-5.1.5/luaconf.h b/third_party/lua-src/lua-5.1.5/luaconf.h
+index bcf781c..32c2a2f 100644
+--- a/third_party/lua-src/lua-5.1.5/luaconf.h
++++ b/third_party/lua-src/lua-5.1.5/luaconf.h
+@@ -693,7 +693,7 @@ union luai_Cast { double l_d; long l_l; };
+ @* the file streams.
+ ** CHANGE it if you have a way to implement it in your system.
+ */
+-#if defined(LUA_USE_POPEN)
++#if defined(LUA_USE_POPEN) && !defined(LUA_USE_IOS)
+ 
+ #define lua_popen(L,c,m)	((void)L, fflush(NULL), popen(c,m))
+ #define lua_pclose(L,file)	((void)L, (pclose(file) != -1))
+diff --git a/third_party/lua-src/src/lib.rs b/third_party/lua-src/src/lib.rs
+index 3663d0a..2d4b067 100644
+--- a/third_party/lua-src/src/lib.rs
++++ b/third_party/lua-src/src/lib.rs
+@@ -140,6 +140,7 @@ impl Build {
+             }
+             _ if target.contains("apple-ios") => {
+                 config.define("LUA_USE_POSIX", None);
++                config.define("LUA_USE_IOS", None);
+             }
+             _ if target.contains("windows") => {
+                 // Defined in Lua >= 5.3
+
