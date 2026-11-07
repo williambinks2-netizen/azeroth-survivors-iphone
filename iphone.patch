@@ -602,10 +602,42 @@ index 0000000..e227337
 +    }
 +}
 diff --git a/crates/benilla-app/src/survivors/mobility.rs b/crates/benilla-app/src/survivors/mobility.rs
-index c588a37..51ac606 100644
+index c588a37..31620b0 100644
 --- a/crates/benilla-app/src/survivors/mobility.rs
 +++ b/crates/benilla-app/src/survivors/mobility.rs
-@@ -174,6 +174,8 @@ impl Run {
+@@ -26,6 +26,31 @@ pub(super) enum Move {
+     Scatter(f32),
+ }
+ 
++// Automatic mobile mobility must not move a stationary hero into empty space.
++#[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++fn auto_mobility_ready(kind: Move, moving: bool, nearest: Option<f32>) -> bool {
++    match kind {
++        Move::Charge(range) => nearest.is_some_and(|d| d > 3.0 && d <= range),
++        Move::Blink(_) => moving && nearest.is_some_and(|d| d <= 6.0),
++        Move::Haste(_) => moving,
++        Move::Vanish(_) => nearest.is_some_and(|d| d <= 8.0),
++        Move::Scatter(range) => nearest.is_some_and(|d| d <= range),
++    }
++}
++
++#[cfg(all(test, any(target_os = "ios", feature = "mobile-touch")))]
++mod mobile_tests {
++    use super::*;
++
++    #[test]
++    fn automatic_mobility_does_not_charge_empty_space_or_blink_at_rest() {
++        assert!(!auto_mobility_ready(Move::Charge(25.0), false, None));
++        assert!(auto_mobility_ready(Move::Charge(25.0), false, Some(10.0)));
++        assert!(!auto_mobility_ready(Move::Blink(18.0), false, Some(3.0)));
++        assert!(auto_mobility_ready(Move::Blink(18.0), true, Some(3.0)));
++    }
++}
++
+ pub(super) struct Mobility {
+     pub spell: u32,
+     pub name: &'static str,
+@@ -174,6 +199,8 @@ impl Run {
  pub(super) fn cast_mobility(
      time: Res<Time>,
      keys: Res<ButtonInput<KeyCode>>,
@@ -614,7 +646,7 @@ index c588a37..51ac606 100644
      phase: Res<State<Phase>>,
      mut run: ResMut<Run>,
      world: WorldPoint,
-@@ -188,7 +190,10 @@ pub(super) fn cast_mobility(
+@@ -188,7 +215,10 @@ pub(super) fn cast_mobility(
      m.cd = (m.cd - dt).max(0.0);
      m.haste_t = (m.haste_t - dt).max(0.0);
      m.vanish_t = (m.vanish_t - dt).max(0.0);
@@ -626,6 +658,22 @@ index c588a37..51ac606 100644
          return;
      }
      let Some(def) = run.mobility() else { return };
+@@ -199,6 +229,15 @@ pub(super) fn cast_mobility(
+         return;
+     };
+     let pos = tf.translation;
++    #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++    if !keys.just_pressed(KEY) && mobile.ability {
++        let nearest = enemies.iter().filter(|(_, _, enemy)| !enemy.dead)
++            .map(|(_, target, _)| hero::reach(pos, target.translation))
++            .min_by(|a, b| a.total_cmp(b));
++        if !auto_mobility_ready(def.kind, mobile.stick.length_squared() > 0.01, nearest) {
++            return;
++        }
++    }
+     let facing = tf.rotation * Vec3::NEG_Z;
+     let facing = flat(facing).normalize_or(Vec3::NEG_Z);
+     // Aimed at the cursor where there is one, else straight ahead.
 diff --git a/crates/benilla-app/src/survivors/mod.rs b/crates/benilla-app/src/survivors/mod.rs
 index fc9acfd..82581c5 100644
 --- a/crates/benilla-app/src/survivors/mod.rs
