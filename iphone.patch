@@ -58,9 +58,24 @@ index 1ba4f55..bffab10 100644
                  None => BodySkin::Composite { face: npc.face },
              },
 diff --git a/crates/benilla-app/src/survivors/hero.rs b/crates/benilla-app/src/survivors/hero.rs
-index 8bf9cc3..b777451 100644
+index 8bf9cc3..73752da 100644
 --- a/crates/benilla-app/src/survivors/hero.rs
 +++ b/crates/benilla-app/src/survivors/hero.rs
+@@ -64,11 +64,11 @@ pub(super) struct CamRig {
+ impl Default for CamRig {
+     fn default() -> Self {
+         Self {
+-            dist: 30.0,
++            dist: if cfg!(any(target_os = "ios", feature = "mobile-touch")) { 12.0 } else { 30.0 },
+             orbit: 0.6,
+             yaw: 0.0,
+-            pitch: FIXED_PITCH,
+-            mode: CamMode::Fixed,
++            pitch: if cfg!(any(target_os = "ios", feature = "mobile-touch")) { 0.55 } else { FIXED_PITCH },
++            mode: if cfg!(any(target_os = "ios", feature = "mobile-touch")) { CamMode::Orbit } else { CamMode::Fixed },
+         }
+     }
+ }
 @@ -195,6 +195,8 @@ pub(super) fn drive_hero(
      aim: Res<AimPoint>,
      world: WorldPoint,
@@ -70,7 +85,7 @@ index 8bf9cc3..b777451 100644
      mut player: ResMut<crate::player::Player>,
      mut hero: Query<(&mut Transform, &mut MovementState, &mut Hero)>,
  ) {
-@@ -227,6 +229,23 @@ pub(super) fn drive_hero(
+@@ -227,6 +229,28 @@ pub(super) fn drive_hero(
                  }
              }
              let mut pos = tf.translation;
@@ -78,7 +93,12 @@ index 8bf9cc3..b777451 100644
 +            let mut touch_step = None;
 +            #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
 +            if *phase.get() == Phase::Playing && run.dead_t.is_none() && auto.is_none() {
-+                if dir != Vec3::ZERO {
++                if mobile.stick.length_squared() > 0.01 {
++                    let (sy, cy) = rig.yaw.sin_cos();
++                    let stick = mobile.stick;
++                    dir = Vec3::new(stick.x * cy + stick.y * sy, 0.0, stick.y * cy - stick.x * sy);
++                    mobile.target = None;
++                } else if dir != Vec3::ZERO {
 +                    mobile.target = None;
 +                } else if let Some(target) = mobile.target {
 +                    let offset = flat(target - pos);
@@ -94,11 +114,13 @@ index 8bf9cc3..b777451 100644
              // Locked, the hero faces the cursor and WASD moves him under it, so he backpedals and
              // strafes as a player does; unlocked (or driven), he faces where he runs.
              let face = (rig.mode == CamMode::Fixed
-@@ -244,7 +263,10 @@ pub(super) fn drive_hero(
+@@ -244,7 +268,12 @@ pub(super) fn drive_hero(
              if dir != Vec3::ZERO && dt > 0.0 {
                  let dir = dir.normalize();
                  let speed = run.stats().speed * run.haste_mult();
 -                pos += dir * speed * dt;
++                #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++                let speed = if mobile.stick.length_squared() > 0.01 { speed * mobile.stick.length().min(1.0) } else { speed };
 +                let step = speed * dt;
 +                #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
 +                let step = touch_step.map_or(step, |distance| step.min(distance));
@@ -106,7 +128,7 @@ index 8bf9cc3..b777451 100644
                  mv.speed = speed;
                  mv.flags = match face {
                      Some(look) => gait(look, dir),
-@@ -272,7 +294,10 @@ pub(super) fn drive_hero(
+@@ -272,7 +301,10 @@ pub(super) fn drive_hero(
              let ground = world.terrain_height_under(pos).unwrap_or(pos.y);
              let playing = *phase.get() == Phase::Playing && run.dead_t.is_none();
              // Space hops: lift off the terrain, then gravity brings the hero back down.
@@ -118,8 +140,30 @@ index 8bf9cc3..b777451 100644
                  hm.vy = JUMP_SPEED;
              }
              if playing && (hm.vy != 0.0 || hm.air > 0.0) {
+@@ -339,6 +371,8 @@ pub(super) fn place_camera(
+     mouse: Res<ButtonInput<MouseButton>>,
+     motion: Res<AccumulatedMouseMotion>,
+     keys: Res<ButtonInput<KeyCode>>,
++    #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++    mobile: Res<super::mobile::MobileInput>,
+     player: Res<crate::player::Player>,
+     world: WorldPoint,
+     hero: Query<&Transform, (With<Hero>, Without<WorldCamera>)>,
+@@ -356,6 +390,12 @@ pub(super) fn place_camera(
+             }
+         };
+     }
++    #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++    if *phase.get() == Phase::Playing {
++        rig.mode = CamMode::Orbit;
++        rig.yaw -= mobile.look_delta.x * ORBIT_RATE;
++        rig.pitch = (rig.pitch + mobile.look_delta.y * ORBIT_RATE).clamp(PITCH_MIN, PITCH_MAX);
++    }
+     // With no hero yet, the focus `drive_hero` grounded.
+     let focus = hero.single().map_or(player.pos, |t| t.translation);
+     // Multiplicative, so a notch moves as far by eye close in as far out; all the way down to an
 diff --git a/crates/benilla-app/src/survivors/hud.rs b/crates/benilla-app/src/survivors/hud.rs
-index 4e48b3e..eac4d5a 100644
+index 4e48b3e..88ea319 100644
 --- a/crates/benilla-app/src/survivors/hud.rs
 +++ b/crates/benilla-app/src/survivors/hud.rs
 @@ -319,11 +319,30 @@ pub(super) fn setup_hud(
@@ -154,23 +198,32 @@ index 4e48b3e..eac4d5a 100644
                  bar.spawn((
                      XpFill,
                      Node {
+@@ -474,6 +493,7 @@ pub(super) fn setup_hud(
+                     flex_direction: FlexDirection::Column,
+                     row_gap: Val::Px(6.0),
+                     width: Val::Px(300.0),
++                    padding: if cfg!(target_os = "ios") { UiRect::top(Val::Px(84.0)) } else { UiRect::default() },
+                     ..default()
+                 })
+                 .with_children(|col| {
 diff --git a/crates/benilla-app/src/survivors/mobile.rs b/crates/benilla-app/src/survivors/mobile.rs
 new file mode 100644
-index 0000000..f939b39
+index 0000000..f8360f9
 --- /dev/null
 +++ b/crates/benilla-app/src/survivors/mobile.rs
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,387 @@
 +//! Single-pointer touch controls for the iPhone port; opt-in on desktop for testing.
 +use bevy::input::{touch::TouchPhase, InputSystems};
 +use bevy::prelude::*;
 +use bevy::window::PrimaryWindow;
 +
-+use super::{hero, hud, mobility, Phase, Run, Selection};
-+use super::units::flat;
++use super::{hero, hud, mobility, Phase, Run};
 +
 +#[derive(Resource, Default)]
 +pub(super) struct MobileInput {
 +    pub target: Option<Vec3>,
++    pub stick: Vec2,
++    pub look_delta: Vec2,
 +    pub jump: bool,
 +    pub ability: bool,
 +    began_on_ui: bool,
@@ -189,13 +242,142 @@ index 0000000..f939b39
 +#[derive(Component)]
 +struct Controls;
 +
++#[derive(Resource, Default)]
++struct Gestures {
++    stick_finger: Option<u64>,
++    camera_finger: Option<u64>,
++    camera_position: Vec2,
++}
++
++#[derive(Component)]
++struct StickKnob;
++#[derive(Component)]
++struct PlayerHealth;
++#[derive(Component)]
++struct PlayerLabel;
++
 +pub(super) fn plugin(app: &mut App) {
 +    app.init_resource::<MobileInput>()
 +        .init_resource::<Pointer>()
-+        .add_systems(Startup, controls)
++        .init_resource::<Gestures>()
++        .add_systems(Startup, (controls, joystick, player_frame))
++        .add_systems(PreUpdate, gestures.after(InputSystems))
 +        .add_systems(PreUpdate, pointer.after(InputSystems).before(bevy::ui::UiSystems::Focus))
 +        .add_systems(Update, input.after(hero::aim_cursor).before(mobility::cast_mobility))
-+        .add_systems(Update, show_controls.after(hud::show_panels));
++        .add_systems(Update, (show_controls, draw_stick, update_player_frame).after(hud::show_panels));
++}
++
++fn player_frame(mut commands: Commands) {
++    commands.spawn((Controls, Node {
++        position_type: PositionType::Absolute, left: Val::Px(12.0), top: Val::Px(10.0),
++        width: Val::Px(290.0), height: Val::Px(72.0), align_items: AlignItems::Center,
++        padding: UiRect::all(Val::Px(6.0)), column_gap: Val::Px(8.0),
++        border: UiRect::all(Val::Px(2.0)), border_radius: BorderRadius::all(Val::Px(10.0)), ..default()
++    }, BackgroundColor(Color::srgba(0.08, 0.06, 0.035, 0.9)),
++        BorderColor::all(Color::srgb(0.55, 0.45, 0.25)), GlobalZIndex(500), Visibility::Hidden,
++        bevy::ui::FocusPolicy::Pass,
++    )).with_children(|frame| {
++        frame.spawn((Node { width: Val::Px(56.0), height: Val::Px(56.0), ..default() },
++            ImageNode { color: Color::NONE, ..default() },
++            hud::UiArt::crop("Interface\\CharacterFrame\\TempPortrait", [0.0, 1.0, 0.0, 1.0])));
++        frame.spawn(Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, row_gap: Val::Px(5.0), ..default() })
++            .with_children(|bar| {
++                bar.spawn((PlayerLabel, Text::new("Warrior"), TextFont { font_size: 18.0, ..default() },
++                    TextColor(Color::srgb(1.0, 0.82, 0.0))));
++                bar.spawn((Node { width: Val::Percent(100.0), height: Val::Px(15.0), border: UiRect::all(Val::Px(1.0)), ..default() },
++                    BackgroundColor(Color::BLACK), BorderColor::all(Color::srgb(0.55, 0.45, 0.25))))
++                    .with_child((PlayerHealth, Node { width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
++                        BackgroundColor(Color::srgb(0.05, 0.7, 0.1))));
++            });
++    });
++}
++
++fn update_player_frame(run: Res<Run>, mut health: Query<&mut Node, With<PlayerHealth>>,
++    mut label: Query<&mut Text, With<PlayerLabel>>) {
++    for mut node in &mut health { node.width = Val::Percent((run.hp / run.stats().max_hp * 100.0).clamp(0.0, 100.0)); }
++    for mut text in &mut label { **text = format!("{}   Level {}", run.class.name, run.level); }
++}
++
++// Coordinates are logical pixels; the UI's 768-unit canvas is scaled to the window height.
++fn stick_center(window: &Window) -> (Vec2, f32) {
++    let scale = window.height() / 768.0;
++    (Vec2::new(130.0 * scale, window.height() - 140.0 * scale), 80.0 * scale)
++}
++
++fn stick_value(position: Vec2, center: Vec2, radius: f32) -> Vec2 {
++    let value = ((position - center) / radius.max(1.0)).clamp_length_max(1.0);
++    if value.length_squared() <= 0.01 { Vec2::ZERO } else { value }
++}
++
++fn over_controls(p: Vec2, window: &Window) -> bool {
++    let s = window.height() / 768.0;
++    p.x >= window.width() - 284.0 * s && p.y >= window.height() - 130.0 * s
++}
++
++fn gestures(
++    mut events: MessageReader<TouchInput>,
++    windows: Query<&Window, With<PrimaryWindow>>,
++    phase: Res<State<Phase>>,
++    loading: Res<crate::loading_screen::LoadingScreen>,
++    mut state: ResMut<Gestures>,
++    mut mobile: ResMut<MobileInput>,
++) {
++    mobile.look_delta = Vec2::ZERO;
++    let Ok(window) = windows.single() else { return };
++    if !window.focused || *phase.get() != Phase::Playing || loading.covering() {
++        *state = Gestures::default();
++        mobile.stick = Vec2::ZERO;
++        events.clear();
++        return;
++    }
++    let (center, radius) = stick_center(window);
++    for e in events.read() {
++        match e.phase {
++            TouchPhase::Started if state.stick_finger.is_none() && e.position.distance(center) <= radius * 1.3 => {
++                state.stick_finger = Some(e.id);
++                mobile.stick = stick_value(e.position, center, radius);
++            }
++            TouchPhase::Started if state.camera_finger.is_none() && !over_controls(e.position, window) => {
++                state.camera_finger = Some(e.id);
++                state.camera_position = e.position;
++            }
++            TouchPhase::Moved if state.stick_finger == Some(e.id) => {
++                mobile.stick = stick_value(e.position, center, radius);
++            }
++            TouchPhase::Moved if state.camera_finger == Some(e.id) => {
++                mobile.look_delta += e.position - state.camera_position;
++                state.camera_position = e.position;
++            }
++            TouchPhase::Ended | TouchPhase::Canceled => {
++                if state.stick_finger == Some(e.id) { state.stick_finger = None; mobile.stick = Vec2::ZERO; }
++                if state.camera_finger == Some(e.id) { state.camera_finger = None; }
++            }
++            _ => {}
++        }
++    }
++}
++
++fn joystick(mut commands: Commands) {
++    commands.spawn((Controls, Node {
++        position_type: PositionType::Absolute, left: Val::Px(50.0), bottom: Val::Px(60.0),
++        width: Val::Px(160.0), height: Val::Px(160.0), border: UiRect::all(Val::Px(3.0)),
++        border_radius: BorderRadius::all(Val::Percent(50.0)), ..default()
++    }, BackgroundColor(Color::srgba(0.02, 0.02, 0.02, 0.25)),
++        BorderColor::all(Color::srgba(0.9, 0.85, 0.7, 0.55)), GlobalZIndex(100), Visibility::Hidden,
++        bevy::ui::FocusPolicy::Pass,
++    )).with_child((StickKnob, Node {
++        position_type: PositionType::Absolute, left: Val::Px(52.0), top: Val::Px(52.0),
++        width: Val::Px(50.0), height: Val::Px(50.0), border: UiRect::all(Val::Px(2.0)),
++        border_radius: BorderRadius::all(Val::Percent(50.0)), ..default()
++    }, BackgroundColor(Color::srgba(0.85, 0.82, 0.72, 0.45)),
++        BorderColor::all(Color::srgba(0.95, 0.9, 0.8, 0.7)), bevy::ui::FocusPolicy::Pass));
++}
++
++fn draw_stick(mobile: Res<MobileInput>, mut knobs: Query<&mut Node, With<StickKnob>>) {
++    for mut node in &mut knobs {
++        node.left = Val::Px(52.0 + mobile.stick.x * 52.0);
++        node.top = Val::Px(52.0 + mobile.stick.y * 52.0);
++    }
 +}
 +
 +// Keep the cursor at the lift position: the character-selection UI clicks on
@@ -205,6 +387,7 @@ index 0000000..f939b39
 +    mut state: ResMut<Pointer>,
 +    mut mouse: ResMut<ButtonInput<MouseButton>>,
 +    mut windows: Query<&mut Window, With<PrimaryWindow>>,
++    phase: Option<Res<State<Phase>>>,
 +) {
 +    state.cancelled = false;
 +    state.pending.extend(events.read().copied());
@@ -219,6 +402,8 @@ index 0000000..f939b39
 +    }
 +    while let Some(event) = state.pending.pop_front() {
 +        match event.phase {
++            TouchPhase::Started if phase.as_ref().is_some_and(|p| *p.get() == Phase::Playing)
++                && !over_controls(event.position, &window) => continue,
 +            TouchPhase::Started if state.finger.is_none() => {
 +                state.finger = Some(event.id);
 +                window.set_cursor_position(Some(event.position));
@@ -301,7 +486,6 @@ index 0000000..f939b39
 +fn input(
 +    phase: Res<State<Phase>>,
 +    run: Res<Run>,
-+    selection: Res<Selection>,
 +    loading: Res<crate::loading_screen::LoadingScreen>,
 +    pointer: Res<Pointer>,
 +    mouse: Res<ButtonInput<MouseButton>>,
@@ -328,13 +512,11 @@ index 0000000..f939b39
 +        mobile.began_on_ui = true;
 +    }
 +    mobile.ability = *phase.get() == Phase::Playing;
-+    let mut action_pressed = false;
 +    for (action, interaction) in &actions {
 +        if *interaction != Interaction::Pressed { continue; }
-+        action_pressed = true;
 +        match (action, phase.get()) {
 +            (Action::Jump, Phase::Playing) => mobile.jump = true,
-+            (Action::Stop, _) => mobile.target = None,
++            (Action::Stop, _) => { mobile.target = None; mobile.stick = Vec2::ZERO; },
 +            (Action::Pause, Phase::Playing) => {
 +                mobile.target = None;
 +                next.set(Phase::Paused);
@@ -346,27 +528,21 @@ index 0000000..f939b39
 +    if mouse.just_pressed(MouseButton::Left) {
 +        mobile.began_on_ui = interactions.iter().any(|i| *i == Interaction::Pressed);
 +    }
-+    if *phase.get() == Phase::Playing && !action_pressed && !mobile.began_on_ui
-+        && mouse.pressed(MouseButton::Left)
-+    {
-+        if let Some(point) = aim.0 {
-+            let map = selection.stage_def();
-+            let center = hero::arena(map);
-+            let offset = flat(point - center);
-+            mobile.target = Some(if offset.length() > map.leash {
-+                center + offset.normalize() * map.leash
-+            } else { point });
-+        }
-+    }
-+    // A button tap must not aim Blink at the button's position in the world.
-+    if mobile.began_on_ui {
-+        aim.0 = mobile.target;
-+    }
++    // Touch drags control the camera, rather than aiming a cursor at the ground.
++    aim.0 = None;
 +}
 +
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
++
++    #[test]
++    fn stick_has_a_dead_zone_and_caps_at_full_deflection() {
++        let center = Vec2::new(100.0, 100.0);
++        assert_eq!(stick_value(center + Vec2::new(1.0, 0.0), center, 50.0), Vec2::ZERO);
++        assert_eq!(stick_value(center + Vec2::new(25.0, 0.0), center, 50.0), Vec2::new(0.5, 0.0));
++        assert_eq!(stick_value(center + Vec2::new(0.0, -100.0), center, 50.0), Vec2::new(0.0, -1.0));
++    }
 +
 +    fn test_app() -> (App, Entity) {
 +        let mut app = App::new();
