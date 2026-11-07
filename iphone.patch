@@ -119,10 +119,10 @@ index 8bf9cc3..b777451 100644
              }
              if playing && (hm.vy != 0.0 || hm.air > 0.0) {
 diff --git a/crates/benilla-app/src/survivors/hud.rs b/crates/benilla-app/src/survivors/hud.rs
-index 4e48b3e..44f59f9 100644
+index 4e48b3e..eac4d5a 100644
 --- a/crates/benilla-app/src/survivors/hud.rs
 +++ b/crates/benilla-app/src/survivors/hud.rs
-@@ -319,9 +319,11 @@ pub(super) fn setup_hud(
+@@ -319,11 +319,30 @@ pub(super) fn setup_hud(
                      margin: UiRect::left(Val::Px(-512.0)),
                      width: Val::Px(1024.0),
                      height: Val::Px(13.0),
@@ -134,13 +134,32 @@ index 4e48b3e..44f59f9 100644
 +                BorderColor::all(Color::srgb(0.55, 0.40, 0.20)),
              ))
              .with_children(|bar| {
++                // Reuse the player's own WoW end-cap art around the mobile XP bar.
++                #[cfg(target_os = "ios")]
++                for (left, flip) in [(true, false), (false, true)] {
++                    bar.spawn((
++                        Node {
++                            position_type: PositionType::Absolute,
++                            left: if left { Val::Px(-96.0) } else { Val::Auto },
++                            right: if left { Val::Auto } else { Val::Px(-96.0) },
++                            bottom: Val::Px(-5.0),
++                            width: Val::Px(128.0),
++                            height: Val::Px(128.0),
++                            ..default()
++                        },
++                        ImageNode { color: Color::NONE, flip_x: flip, ..default() },
++                        UiArt::crop("Interface\\MainMenuBar\\UI-MainMenuBar-EndCap-Dwarf", [0.0, 1.0, 0.0, 1.0]),
++                    ));
++                }
                  bar.spawn((
+                     XpFill,
+                     Node {
 diff --git a/crates/benilla-app/src/survivors/mobile.rs b/crates/benilla-app/src/survivors/mobile.rs
 new file mode 100644
-index 0000000..54221c9
+index 0000000..f939b39
 --- /dev/null
 +++ b/crates/benilla-app/src/survivors/mobile.rs
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,263 @@
 +//! Single-pointer touch controls for the iPhone port; opt-in on desktop for testing.
 +use bevy::input::{touch::TouchPhase, InputSystems};
 +use bevy::prelude::*;
@@ -254,6 +273,8 @@ index 0000000..54221c9
 +                },
 +                BackgroundColor(Color::srgba(0.10, 0.06, 0.025, 0.92)),
 +                BorderColor::all(Color::srgb(0.65, 0.48, 0.22)),
++                ImageNode { color: Color::NONE, ..default() },
++                hud::UiArt::crop("Interface\\Buttons\\UI-Quickslot2", [0.0, 1.0, 0.0, 1.0]),
 +            )).with_child((
 +                Text::new(label),
 +                TextFont { font_size: 20.0, ..default() },
