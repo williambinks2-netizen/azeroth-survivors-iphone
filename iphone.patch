@@ -26,6 +26,37 @@ index 0f43836..26fc732 100644
  raw-window-handle = "0.6"
  smithay-clipboard = "0.7"
  
+diff --git a/crates/benilla-app/src/entities/attach/char_skin.rs b/crates/benilla-app/src/entities/attach/char_skin.rs
+index 1ba4f55..bffab10 100644
+--- a/crates/benilla-app/src/entities/attach/char_skin.rs
++++ b/crates/benilla-app/src/entities/attach/char_skin.rs
+@@ -35,6 +35,17 @@ pub(super) enum BodySkin {
+     Baked(String),
+ }
+ 
++// Some compact game-data sets omit pre-baked NPC atlases while retaining the
++// character layers. On iOS, use those layers when the named bake is absent.
++#[cfg(target_os = "ios")]
++fn baked_npc_exists(name: &str) -> bool {
++    static CHAIN: std::sync::OnceLock<Option<benilla_formats::Chain>> = std::sync::OnceLock::new();
++    CHAIN
++        .get_or_init(|| benilla_formats::wow_data().and_then(|p| benilla_formats::Chain::open(&p).ok()))
++        .as_ref()
++        .is_none_or(|chain| chain.contains(&format!("textures/bakednpctextures/{name}")))
++}
++
+ /// A net entity's character look; `None` unless its display is a character-model body.
+ pub(super) fn resolve_char_look(
+     net: &NetEntity,
+@@ -55,6 +66,8 @@ pub(super) fn resolve_char_look(
+             hair_color: npc.hair_color,
+             facial_hair: npc.facial_hair,
+             body: match &npc.bake_name {
++                #[cfg(target_os = "ios")]
++                Some(name) if !baked_npc_exists(name) => BodySkin::Composite { face: npc.face },
+                 Some(name) => BodySkin::Baked(name.clone()),
+                 None => BodySkin::Composite { face: npc.face },
+             },
 diff --git a/crates/benilla-app/src/survivors/hero.rs b/crates/benilla-app/src/survivors/hero.rs
 index 8bf9cc3..b777451 100644
 --- a/crates/benilla-app/src/survivors/hero.rs
@@ -87,6 +118,23 @@ index 8bf9cc3..b777451 100644
                  hm.vy = JUMP_SPEED;
              }
              if playing && (hm.vy != 0.0 || hm.air > 0.0) {
+diff --git a/crates/benilla-app/src/survivors/hud.rs b/crates/benilla-app/src/survivors/hud.rs
+index 4e48b3e..44f59f9 100644
+--- a/crates/benilla-app/src/survivors/hud.rs
++++ b/crates/benilla-app/src/survivors/hud.rs
+@@ -319,9 +319,11 @@ pub(super) fn setup_hud(
+                     margin: UiRect::left(Val::Px(-512.0)),
+                     width: Val::Px(1024.0),
+                     height: Val::Px(13.0),
++                    border: UiRect::all(Val::Px(1.0)),
+                     ..default()
+                 },
+-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
++                BackgroundColor(Color::srgb(0.08, 0.05, 0.035)),
++                BorderColor::all(Color::srgb(0.55, 0.40, 0.20)),
+             ))
+             .with_children(|bar| {
+                 bar.spawn((
 diff --git a/crates/benilla-app/src/survivors/mobile.rs b/crates/benilla-app/src/survivors/mobile.rs
 new file mode 100644
 index 0000000..4833857
