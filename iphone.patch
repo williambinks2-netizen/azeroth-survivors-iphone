@@ -89,10 +89,10 @@ index 8bf9cc3..b777451 100644
              if playing && (hm.vy != 0.0 || hm.air > 0.0) {
 diff --git a/crates/benilla-app/src/survivors/mobile.rs b/crates/benilla-app/src/survivors/mobile.rs
 new file mode 100644
-index 0000000..dade0ad
+index 0000000..4833857
 --- /dev/null
 +++ b/crates/benilla-app/src/survivors/mobile.rs
-@@ -0,0 +1,259 @@
+@@ -0,0 +1,261 @@
 +//! Single-pointer touch controls for the iPhone port; opt-in on desktop for testing.
 +use bevy::input::{touch::TouchPhase, InputSystems};
 +use bevy::prelude::*;
@@ -117,7 +117,7 @@ index 0000000..dade0ad
 +}
 +
 +#[derive(Component, Clone, Copy)]
-+enum Action { Jump, Ability, Pause, Stop }
++enum Action { Jump, Pause, Stop }
 +
 +#[derive(Component)]
 +struct Controls;
@@ -178,9 +178,9 @@ index 0000000..dade0ad
 +        Controls,
 +        Node {
 +            position_type: PositionType::Absolute,
-+            right: Val::Px(120.0),
-+            bottom: Val::Px(110.0),
-+            column_gap: Val::Px(18.0),
++            right: Val::Px(28.0),
++            bottom: Val::Px(48.0),
++            column_gap: Val::Px(8.0),
 +            ..default()
 +        },
 +        GlobalZIndex(100),
@@ -189,25 +189,27 @@ index 0000000..dade0ad
 +        for (action, label) in [
 +            (Action::Stop, "Stop"),
 +            (Action::Jump, "Jump"),
-+            (Action::Ability, "Ability"),
-+            (Action::Pause, "Pause / Resume"),
++            (Action::Pause, "Pause"),
 +        ] {
 +            parent.spawn((
 +                Button,
 +                action,
 +                Node {
-+                    min_width: Val::Px(112.0),
-+                    height: Val::Px(112.0),
-+                    padding: UiRect::all(Val::Px(12.0)),
++                    width: Val::Px(56.0),
++                    height: Val::Px(48.0),
++                    padding: UiRect::all(Val::Px(4.0)),
++                    border: UiRect::all(Val::Px(2.0)),
++                    border_radius: BorderRadius::all(Val::Px(5.0)),
 +                    align_items: AlignItems::Center,
 +                    justify_content: JustifyContent::Center,
 +                    ..default()
 +                },
-+                BackgroundColor(Color::srgba(0.06, 0.09, 0.13, 0.9)),
++                BackgroundColor(Color::srgba(0.10, 0.06, 0.025, 0.92)),
++                BorderColor::all(Color::srgb(0.65, 0.48, 0.22)),
 +            )).with_child((
 +                Text::new(label),
-+                TextFont { font_size: 24.0, ..default() },
-+                TextColor(Color::WHITE),
++                TextFont { font_size: 14.0, ..default() },
++                TextColor(Color::srgb(1.0, 0.82, 0.45)),
 +            ));
 +        }
 +    });
@@ -256,13 +258,13 @@ index 0000000..dade0ad
 +        mobile.target = None;
 +        mobile.began_on_ui = true;
 +    }
++    mobile.ability = *phase.get() == Phase::Playing;
 +    let mut action_pressed = false;
 +    for (action, interaction) in &actions {
 +        if *interaction != Interaction::Pressed { continue; }
 +        action_pressed = true;
 +        match (action, phase.get()) {
 +            (Action::Jump, Phase::Playing) => mobile.jump = true,
-+            (Action::Ability, Phase::Playing) => mobile.ability = true,
 +            (Action::Stop, _) => mobile.target = None,
 +            (Action::Pause, Phase::Playing) => {
 +                mobile.target = None;
