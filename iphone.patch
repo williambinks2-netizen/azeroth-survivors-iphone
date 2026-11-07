@@ -137,7 +137,7 @@ index 4e48b3e..44f59f9 100644
                  bar.spawn((
 diff --git a/crates/benilla-app/src/survivors/mobile.rs b/crates/benilla-app/src/survivors/mobile.rs
 new file mode 100644
-index 0000000..4833857
+index 0000000..54221c9
 --- /dev/null
 +++ b/crates/benilla-app/src/survivors/mobile.rs
 @@ -0,0 +1,261 @@
@@ -243,8 +243,8 @@ index 0000000..4833857
 +                Button,
 +                action,
 +                Node {
-+                    width: Val::Px(56.0),
-+                    height: Val::Px(48.0),
++                    width: Val::Px(80.0),
++                    height: Val::Px(72.0),
 +                    padding: UiRect::all(Val::Px(4.0)),
 +                    border: UiRect::all(Val::Px(2.0)),
 +                    border_radius: BorderRadius::all(Val::Px(5.0)),
@@ -256,7 +256,7 @@ index 0000000..4833857
 +                BorderColor::all(Color::srgb(0.65, 0.48, 0.22)),
 +            )).with_child((
 +                Text::new(label),
-+                TextFont { font_size: 14.0, ..default() },
++                TextFont { font_size: 20.0, ..default() },
 +                TextColor(Color::srgb(1.0, 0.82, 0.45)),
 +            ));
 +        }
