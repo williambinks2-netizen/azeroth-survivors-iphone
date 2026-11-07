@@ -57,10 +57,48 @@ index 1ba4f55..bffab10 100644
                  Some(name) => BodySkin::Baked(name.clone()),
                  None => BodySkin::Composite { face: npc.face },
              },
+diff --git a/crates/benilla-app/src/portrait/mod.rs b/crates/benilla-app/src/portrait/mod.rs
+index efdd993..8c31b3e 100644
+--- a/crates/benilla-app/src/portrait/mod.rs
++++ b/crates/benilla-app/src/portrait/mod.rs
+@@ -660,6 +660,8 @@ pub(crate) struct BoothBridge<'w> {
+ /// cache is the only race and sex for a member we hold no object for.
+ #[derive(bevy::ecs::system::SystemParam)]
+ pub(crate) struct PartyBooths<'w, 's> {
++    #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++    survivor_hero: Query<'w, 's, Entity, With<crate::survivors::hero::Hero>>,
+     roster: Res<'w, crate::ui_party::GroupState>,
+     index: Res<'w, crate::net::GuidIndex>,
+     palettes: ResMut<'w, benilla_world::rig_palette::RigPalettes>,
+@@ -1306,7 +1308,14 @@ fn sync_portraits(
+         let mut unseen: Option<String> = None;
+         let mut occupant: Option<u64> = None;
+         let unit: Option<Entity> = match token {
+-            "player" => self_q.single().ok(),
++            "player" => {
++                let player = self_q.single().ok();
++                #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++                let player = player.or_else(|| {
++                    crate::survivors::active().then(|| party.survivor_hero.single().ok()).flatten()
++                });
++                player
++            },
+             "target" => selection.target,
+             // Gated on the UI drawing the slot: its frame ships hidden (`SHOW_TARGET_OF_TARGET`
+             // defaults to `"0"`), and ungated it would re-bake on every target switch.
 diff --git a/crates/benilla-app/src/survivors/hero.rs b/crates/benilla-app/src/survivors/hero.rs
-index 8bf9cc3..73752da 100644
+index 8bf9cc3..cb81c64 100644
 --- a/crates/benilla-app/src/survivors/hero.rs
 +++ b/crates/benilla-app/src/survivors/hero.rs
+@@ -12,7 +12,7 @@ use crate::creature_anim::{move_flags, MovementState};
+ use crate::net::{FieldChanged, Guid, ObjectStore};
+ 
+ #[derive(Component)]
+-pub(super) struct Hero {
++pub(crate) struct Hero {
+     /// Vertical velocity in yards/second while airborne; 0 on the ground.
+     pub(super) vy: f32,
+     /// Height above the ground while airborne. Kept here, not in the transform: the creature
 @@ -64,11 +64,11 @@ pub(super) struct CamRig {
  impl Default for CamRig {
      fn default() -> Self {
@@ -163,12 +201,19 @@ index 8bf9cc3..73752da 100644
      let focus = hero.single().map_or(player.pos, |t| t.translation);
      // Multiplicative, so a notch moves as far by eye close in as far out; all the way down to an
 diff --git a/crates/benilla-app/src/survivors/hud.rs b/crates/benilla-app/src/survivors/hud.rs
-index 4e48b3e..88ea319 100644
+index 4e48b3e..84b3019 100644
 --- a/crates/benilla-app/src/survivors/hud.rs
 +++ b/crates/benilla-app/src/survivors/hud.rs
-@@ -319,11 +319,30 @@ pub(super) fn setup_hud(
-                     margin: UiRect::left(Val::Px(-512.0)),
-                     width: Val::Px(1024.0),
+@@ -315,15 +315,34 @@ pub(super) fn setup_hud(
+                 Node {
+                     position_type: PositionType::Absolute,
+                     left: Val::Percent(50.0),
+-                    bottom: Val::Px(0.0),
+-                    margin: UiRect::left(Val::Px(-512.0)),
+-                    width: Val::Px(1024.0),
++                    bottom: Val::Px(if cfg!(any(target_os = "ios", feature = "mobile-touch")) { 48.0 } else { 0.0 }),
++                    margin: UiRect::left(Val::Px(if cfg!(any(target_os = "ios", feature = "mobile-touch")) { -220.0 } else { -512.0 })),
++                    width: Val::Px(if cfg!(any(target_os = "ios", feature = "mobile-touch")) { 440.0 } else { 1024.0 }),
                      height: Val::Px(13.0),
 +                    border: UiRect::all(Val::Px(1.0)),
                      ..default()
@@ -186,7 +231,7 @@ index 4e48b3e..88ea319 100644
 +                            position_type: PositionType::Absolute,
 +                            left: if left { Val::Px(-96.0) } else { Val::Auto },
 +                            right: if left { Val::Auto } else { Val::Px(-96.0) },
-+                            bottom: Val::Px(-5.0),
++                            bottom: Val::Px(-48.0),
 +                            width: Val::Px(128.0),
 +                            height: Val::Px(128.0),
 +                            ..default()
@@ -198,7 +243,62 @@ index 4e48b3e..88ea319 100644
                  bar.spawn((
                      XpFill,
                      Node {
-@@ -474,6 +493,7 @@ pub(super) fn setup_hud(
+@@ -348,9 +367,9 @@ pub(super) fn setup_hud(
+                     bar.spawn((
+                         Node {
+                             position_type: PositionType::Absolute,
+-                            left: Val::Px(256.0 * i as f32),
++                            left: if cfg!(any(target_os = "ios", feature = "mobile-touch")) { Val::Percent(25.0 * i as f32) } else { Val::Px(256.0 * i as f32) },
+                             top: Val::Px(0.0),
+-                            width: Val::Px(256.0),
++                            width: if cfg!(any(target_os = "ios", feature = "mobile-touch")) { Val::Percent(25.0) } else { Val::Px(256.0) },
+                             height: Val::Px(10.0),
+                             ..default()
+                         },
+@@ -394,14 +413,32 @@ pub(super) fn setup_hud(
+                 });
+             });
+             minimap::spawn_cluster(root, f, &map);
++            // On touch devices the learned abilities sit in the action bar, with the
++            // existing cooldown sweep still driven by their independent timers.
++            #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++            root.spawn((
++                AbilityRow,
++                Node {
++                    position_type: PositionType::Absolute,
++                    left: Val::Percent(50.0),
++                    bottom: Val::Px(4.0),
++                    margin: UiRect::left(Val::Px(-220.0)),
++                    width: Val::Px(440.0),
++                    height: Val::Px(42.0),
++                    padding: UiRect::left(Val::Px(6.0)),
++                    column_gap: Val::Px(3.0),
++                    ..default()
++                },
++                BackgroundColor(Color::srgba(0.055, 0.045, 0.035, 0.92)),
++            ));
+             // The mobility button: a 36-unit action slot in `UI-Quickslot2`, its key over it.
+             root.spawn((
+                 MobilitySlot,
+                 Node {
+                     position_type: PositionType::Absolute,
+                     left: Val::Percent(50.0),
+-                    bottom: Val::Px(24.0),
+-                    margin: UiRect::left(Val::Px(-MOBILITY_SIZE / 2.0)),
++                    bottom: Val::Px(if cfg!(any(target_os = "ios", feature = "mobile-touch")) { 7.0 } else { 24.0 }),
++                    margin: UiRect::left(Val::Px(if cfg!(any(target_os = "ios", feature = "mobile-touch")) { 172.0 } else { -MOBILITY_SIZE / 2.0 })),
+                     flex_direction: FlexDirection::Column,
+                     align_items: AlignItems::Center,
+                     row_gap: Val::Px(2.0),
+@@ -410,6 +447,7 @@ pub(super) fn setup_hud(
+                 },
+             ))
+             .with_children(|col| {
++                #[cfg(not(any(target_os = "ios", feature = "mobile-touch")))]
+                 col.spawn(centered(f, "F", 18.0, Color::WHITE));
+                 col.spawn((
+                     Node {
+@@ -474,9 +512,11 @@ pub(super) fn setup_hud(
                      flex_direction: FlexDirection::Column,
                      row_gap: Val::Px(6.0),
                      width: Val::Px(300.0),
@@ -206,15 +306,66 @@ index 4e48b3e..88ea319 100644
                      ..default()
                  })
                  .with_children(|col| {
++                    #[cfg(not(any(target_os = "ios", feature = "mobile-touch")))]
+                     col.spawn((
+                         AbilityRow,
+                         Node {
+@@ -1320,6 +1360,8 @@ pub(super) fn refresh_hud(
+                     .map(|(i, (p, l))| (p.spell, *l, 30.0, TipFor::Passive(i)))
+                     .collect()
+             };
++            #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++            let entry_count = entries.len();
+             for (spell, level, size, tip) in entries {
+                 let ability = match &tip {
+                     TipFor::Ability(i) => Some(*i),
+@@ -1337,6 +1379,19 @@ pub(super) fn refresh_hud(
+                     tip,
+                 ))
+                 .with_children(|slot| {
++                    #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++                    if ability.is_some() {
++                        slot.spawn((
++                            Node {
++                                position_type: PositionType::Absolute,
++                                left: Val::Px(-4.0), top: Val::Px(-4.0),
++                                width: Val::Px(size + 6.0), height: Val::Px(size + 6.0),
++                                ..default()
++                            },
++                            ImageNode { color: Color::NONE, ..default() },
++                            UiArt::crop("Interface\\Buttons\\UI-Quickslot2", [0.0, 1.0, 0.0, 1.0]),
++                        ));
++                    }
+                     slot.spawn(icon(spell, size - 2.0));
+                     // The cooldown sweep sits over the icon, under the level text.
+                     if let Some(i) = ability {
+@@ -1363,6 +1418,16 @@ pub(super) fn refresh_hud(
+                     });
+                 });
+             }
++            #[cfg(any(target_os = "ios", feature = "mobile-touch"))]
++            if is_abilities {
++                for _ in entry_count..8 {
++                    row.spawn((
++                        Node { width: Val::Px(40.0), height: Val::Px(40.0), ..default() },
++                        ImageNode { color: Color::NONE, ..default() },
++                        UiArt::crop("Interface\\Buttons\\UI-Quickslot2", [0.0, 1.0, 0.0, 1.0]),
++                    ));
++                }
++            }
+         });
+     }
+ }
 diff --git a/crates/benilla-app/src/survivors/mobile.rs b/crates/benilla-app/src/survivors/mobile.rs
 new file mode 100644
-index 0000000..e227337
+index 0000000..806e042
 --- /dev/null
 +++ b/crates/benilla-app/src/survivors/mobile.rs
-@@ -0,0 +1,389 @@
+@@ -0,0 +1,441 @@
 +//! Single-pointer touch controls for the iPhone port; opt-in on desktop for testing.
 +use bevy::input::{touch::TouchPhase, InputSystems};
 +use bevy::prelude::*;
++use bevy::ui::CalculatedClip;
 +use bevy::window::PrimaryWindow;
 +
 +use super::{hero, hud, mobility, Phase, Run};
@@ -255,6 +406,8 @@ index 0000000..e227337
 +struct PlayerHealth;
 +#[derive(Component)]
 +struct PlayerLabel;
++#[derive(Component)]
++struct PlayerPortrait;
 +
 +pub(super) fn plugin(app: &mut App) {
 +    app.init_resource::<MobileInput>()
@@ -264,23 +417,25 @@ index 0000000..e227337
 +        .add_systems(PreUpdate, gestures.after(InputSystems))
 +        .add_systems(PreUpdate, pointer.after(InputSystems).before(bevy::ui::UiSystems::Focus))
 +        .add_systems(Update, input.after(hero::aim_cursor).before(mobility::cast_mobility))
-+        .add_systems(Update, (show_controls, draw_stick, update_player_frame).after(hud::show_panels));
++        .add_systems(Update, (show_controls, draw_stick, update_player_frame, update_player_portrait).after(hud::show_panels));
 +}
 +
 +fn player_frame(mut commands: Commands, assets: Res<AssetServer>) {
 +    let font = crate::char_select::wow_font(&assets);
 +    commands.spawn((Controls, Node {
 +        position_type: PositionType::Absolute, left: Val::Px(12.0), top: Val::Px(10.0),
-+        width: Val::Px(290.0), height: Val::Px(72.0), align_items: AlignItems::Center,
-+        padding: UiRect::all(Val::Px(6.0)), column_gap: Val::Px(8.0),
-+        border: UiRect::all(Val::Px(2.0)), border_radius: BorderRadius::all(Val::Px(10.0)), ..default()
-+    }, BackgroundColor(Color::srgba(0.08, 0.06, 0.035, 0.9)),
++        width: Val::Px(252.0), height: Val::Px(72.0), align_items: AlignItems::Center,
++        padding: UiRect::all(Val::Px(4.0)), column_gap: Val::Px(4.0),
++        border: UiRect::all(Val::Px(2.0)), border_radius: BorderRadius::all(Val::Px(14.0)), ..default()
++    }, BackgroundColor(Color::srgba(0.08, 0.065, 0.045, 0.95)),
 +        BorderColor::all(Color::srgb(0.55, 0.45, 0.25)), GlobalZIndex(500), Visibility::Hidden,
 +        bevy::ui::FocusPolicy::Pass,
 +    )).with_children(|frame| {
-+        frame.spawn((Node { width: Val::Px(56.0), height: Val::Px(56.0), ..default() },
-+            ImageNode { color: Color::NONE, ..default() },
-+            hud::UiArt::crop("Interface\\CharacterFrame\\TempPortrait", [0.0, 1.0, 0.0, 1.0])));
++        frame.spawn((Node { width: Val::Px(60.0), height: Val::Px(60.0),
++            border: UiRect::all(Val::Px(3.0)), border_radius: BorderRadius::all(Val::Percent(50.0)),
++            overflow: Overflow::clip(), ..default() }, BorderColor::all(Color::srgb(0.55, 0.45, 0.25))))
++            .with_child((PlayerPortrait, Node { width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
++                ImageNode { color: Color::NONE, ..default() }));
 +        frame.spawn(Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, row_gap: Val::Px(5.0), ..default() })
 +            .with_children(|bar| {
 +                bar.spawn((PlayerLabel, Text::new("Warrior"), TextFont { font: font.clone(), font_size: 18.0, ..default() },
@@ -291,6 +446,26 @@ index 0000000..e227337
 +                        BackgroundColor(Color::srgb(0.05, 0.7, 0.1))));
 +            });
 +    });
++}
++
++/// The survivor hero is mirrored by the regular portrait booth. Keep the image blank while
++/// the model is still loading rather than showing the generic question-mark texture.
++fn update_player_portrait(
++    portraits: Option<Res<crate::portrait::PortraitImages>>,
++    mut nodes: Query<&mut ImageNode, With<PlayerPortrait>>,
++) {
++    let image = match portraits.as_ref().and_then(|p| p.0.get("player")) {
++        Some(crate::portrait::PortraitSource::Live(image)) => Some(image),
++        _ => None,
++    };
++    for mut node in &mut nodes {
++        if let Some(image) = image {
++            if node.image != *image { node.image = image.clone(); }
++            node.color = Color::WHITE;
++        } else {
++            node.color = Color::NONE;
++        }
++    }
 +}
 +
 +fn update_player_frame(run: Res<Run>, mut health: Query<&mut Node, With<PlayerHealth>>,
@@ -310,9 +485,21 @@ index 0000000..e227337
 +    if value.length_squared() <= 0.01 { Vec2::ZERO } else { value }
 +}
 +
-+fn over_controls(p: Vec2, window: &Window) -> bool {
-+    let s = window.height() / 768.0;
-+    p.x >= window.width() - 284.0 * s && p.y >= window.height() - 130.0 * s
++type InteractiveNodes<'w, 's> = Query<'w, 's,
++    (&'static ComputedNode, &'static UiGlobalTransform, &'static InheritedVisibility, Option<&'static CalculatedClip>),
++    With<Interaction>>;
++
++/// UI layout uses physical pixels; touch events are in window logical pixels.
++/// Only interactive, visible and unclipped nodes reserve a finger for the UI.
++fn hits_interactive_ui(position: Vec2, window: &Window, nodes: &InteractiveNodes) -> bool {
++    let physical = position * window.scale_factor();
++    nodes.iter().any(|(node, transform, visible, clip)| {
++        node_hit(node, *transform, visible.get(), clip.map(|c| c.clip), physical)
++    })
++}
++
++fn node_hit(node: &ComputedNode, transform: UiGlobalTransform, visible: bool, clip: Option<Rect>, point: Vec2) -> bool {
++    visible && clip.is_none_or(|rect| rect.contains(point)) && node.contains_point(transform, point)
 +}
 +
 +fn gestures(
@@ -322,6 +509,7 @@ index 0000000..e227337
 +    loading: Res<crate::loading_screen::LoadingScreen>,
 +    mut state: ResMut<Gestures>,
 +    mut mobile: ResMut<MobileInput>,
++    interactive: InteractiveNodes,
 +) {
 +    mobile.look_delta = Vec2::ZERO;
 +    let Ok(window) = windows.single() else { return };
@@ -334,11 +522,12 @@ index 0000000..e227337
 +    let (center, radius) = stick_center(window);
 +    for e in events.read() {
 +        match e.phase {
++            TouchPhase::Started if hits_interactive_ui(e.position, window, &interactive) => {}
 +            TouchPhase::Started if state.stick_finger.is_none() && e.position.distance(center) <= radius * 1.3 => {
 +                state.stick_finger = Some(e.id);
 +                mobile.stick = stick_value(e.position, center, radius);
 +            }
-+            TouchPhase::Started if state.camera_finger.is_none() && !over_controls(e.position, window) => {
++            TouchPhase::Started if state.camera_finger.is_none() => {
 +                state.camera_finger = Some(e.id);
 +                state.camera_position = e.position;
 +            }
@@ -389,6 +578,7 @@ index 0000000..e227337
 +    mut mouse: ResMut<ButtonInput<MouseButton>>,
 +    mut windows: Query<&mut Window, With<PrimaryWindow>>,
 +    phase: Option<Res<State<Phase>>>,
++    interactive: InteractiveNodes,
 +) {
 +    state.cancelled = false;
 +    state.pending.extend(events.read().copied());
@@ -404,7 +594,7 @@ index 0000000..e227337
 +    while let Some(event) = state.pending.pop_front() {
 +        match event.phase {
 +            TouchPhase::Started if phase.as_ref().is_some_and(|p| *p.get() == Phase::Playing)
-+                && !over_controls(event.position, &window) => continue,
++                && !hits_interactive_ui(event.position, &window, &interactive) => continue,
 +            TouchPhase::Started if state.finger.is_none() => {
 +                state.finger = Some(event.id);
 +                window.set_cursor_position(Some(event.position));
@@ -546,6 +736,18 @@ index 0000000..e227337
 +        assert_eq!(stick_value(center + Vec2::new(0.0, -100.0), center, 50.0), Vec2::new(0.0, -1.0));
 +    }
 +
++    #[test]
++    fn ui_hit_tests_geometry_visibility_and_clip() {
++        let mut node = ComputedNode::default();
++        node.size = Vec2::new(100.0, 80.0);
++        let xf = UiGlobalTransform::default();
++        assert!(node_hit(&node, xf, true, None, Vec2::new(10.0, 10.0)));
++        assert!(!node_hit(&node, xf, true, None, Vec2::new(80.0, 10.0)));
++        assert!(!node_hit(&node, xf, false, None, Vec2::new(10.0, 10.0)));
++        let clip = Rect::from_corners(Vec2::new(-5.0, -5.0), Vec2::new(5.0, 5.0));
++        assert!(!node_hit(&node, xf, true, Some(clip), Vec2::new(10.0, 10.0)));
++    }
++
 +    fn test_app() -> (App, Entity) {
 +        let mut app = App::new();
 +        app.add_message::<TouchInput>()
@@ -675,10 +877,16 @@ index c588a37..31620b0 100644
      let facing = flat(facing).normalize_or(Vec3::NEG_Z);
      // Aimed at the cursor where there is one, else straight ahead.
 diff --git a/crates/benilla-app/src/survivors/mod.rs b/crates/benilla-app/src/survivors/mod.rs
-index fc9acfd..82581c5 100644
+index fc9acfd..84f5c0f 100644
 --- a/crates/benilla-app/src/survivors/mod.rs
 +++ b/crates/benilla-app/src/survivors/mod.rs
-@@ -16,6 +16,8 @@ mod hud;
+@@ -11,11 +11,13 @@ mod data;
+ mod enemies;
+ mod fill;
+ mod grade;
+-mod hero;
++pub(crate) mod hero;
+ mod hud;
  mod menu;
  mod minimap;
  mod mobility;
@@ -933,4 +1141,3 @@ index 3663d0a..2d4b067 100644
              }
              _ if target.contains("windows") => {
                  // Defined in Lua >= 5.3
-
